@@ -7,8 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/navica-dev/nautilus/internal/config"
 	"github.com/navica-dev/nautilus/pkg/interfaces"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -18,7 +17,7 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	router chi.Router
+	mux    *http.ServeMux
 	server *http.Server
 	config *config.APIConfig
 	logger zerolog.Logger
@@ -51,21 +50,20 @@ type ComponentHealth struct {
 	Message string `json:"message,omitempty"`
 }
 
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+const requestIDKey contextKey = "requestID"
+
 // NewServer creates a new API server
 func NewServer(cfg *config.APIConfig, version string) *Server {
-	r := chi.NewRouter()
-
-	// Base middleware
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	mux := http.NewServeMux()
 
 	// Setup logger
 	logger := log.With().Str("component", "api-server").Logger()
 
 	s := &Server{
-		router:         r,
+		mux:            mux,
 		config:         cfg,
 		logger:         logger,
 		healthCheckers: make([]interfaces.HealthCheck, 0),
@@ -76,10 +74,16 @@ func NewServer(cfg *config.APIConfig, version string) *Server {
 	// Register routes
 	s.registerRoutes()
 
+	// Create handler chain with middleware
+	handler := s.recoverer(s.requestID(s.realIP(mux)))
+
+	// Wrap with timeout
+	handler = http.TimeoutHandler(handler, 30*time.Second, "request timeout")
+
 	// Create server
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: r,
+		Handler: handler,
 	}
 
 	return s
@@ -115,27 +119,85 @@ func (s *Server) Stop(ctx context.Context) error {
 // registerRoutes sets up the HTTP routes
 func (s *Server) registerRoutes() {
 	// Health check endpoint
-	s.router.Get("/health", s.handleHealth())
+	s.mux.HandleFunc("GET /health", s.handleHealth())
 
 	// Readiness check endpoint
-	s.router.Get("/ready", s.handleReady())
+	s.mux.HandleFunc("GET /ready", s.handleReady())
 
 	// Liveness check endpoint
-	s.router.Get("/live", s.handleLive())
+	s.mux.HandleFunc("GET /live", s.handleLive())
 
 	// Metrics endpoint
-	s.router.Handle("/metrics", promhttp.Handler())
+	s.mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Version endpoint
-	s.router.Get("/version", func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"version": s.version})
 	})
 
 	// Debug endpoints
-	s.router.Route("/debug", func(r chi.Router) {
-		r.Get("/config", s.handleConfig())
+	s.mux.HandleFunc("GET /debug/config", s.handleConfig())
+}
+
+// Middleware functions
+
+// requestID adds a unique request ID to the context and response headers
+func (s *Server) requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.Header.Get("X-Request-Id")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
+		w.Header().Set("X-Request-Id", requestID)
+		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
+
+// realIP extracts the real IP address from proxy headers
+func (s *Server) realIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check X-Forwarded-For header
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Use the first IP in the list (before the first comma)
+			for idx := 0; idx < len(xff); idx++ {
+				if xff[idx] == ',' {
+					r.RemoteAddr = xff[:idx]
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			r.RemoteAddr = xff
+		} else if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			r.RemoteAddr = xri
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverer recovers from panics and logs them
+func (s *Server) recoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rvr := recover(); rvr != nil {
+				s.logger.Error().
+					Interface("panic", rvr).
+					Str("method", r.Method).
+					Str("path", r.URL.Path).
+					Msg("Request panic recovered")
+
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("internal server error"))
+			}
+		}()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Handler functions
 
 // handleHealth creates the health check handler
 func (s *Server) handleHealth() http.HandlerFunc {
