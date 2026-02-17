@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nautilus-scheduled
+  labels:
+    app: nautilus
+    job-type: scheduled
+spec:
+  # Run every hour at minute 0
+  schedule: "0 * * * *"
+
+  # Timezone for the cron schedule (Kubernetes 1.27+)
+  timeZone: "UTC"
+
+  # How many successful job completions to keep
+  successfulJobsHistoryLimit: 3
+
+  # How many failed job completions to keep
+  failedJobsHistoryLimit: 1
+
+  # What to do if the job is still running when next schedule arrives
+  concurrencyPolicy: Forbid  # Options: Allow, Forbid, Replace
+
+  # How long to wait before starting if we missed the scheduled time
+  startingDeadlineSeconds: 300
+
+  jobTemplate:
+    metadata:
+      labels:
+        app: nautilus
+        job-type: scheduled
+    spec:
+      # Clean up completed pods after 1 hour
+      ttlSecondsAfterFinished: 3600
+
+      # Don't retry - Nautilus handles retries internally
+      backoffLimit: 0
+
+      template:
+        metadata:
+          labels:
+            app: nautilus
+            job-type: scheduled
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "12911"
+            prometheus.io/path: "/metrics"
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 60
+
+          containers:
+          - name: nautilus
+            image: your-registry/nautilus-oneshot:latest
+            imagePullPolicy: Always
+
+            env:
+            - name: NAUTILUS_LOGGING_LEVEL
+              value: "info"
+            - name: NAUTILUS_JOB_NAME
+              value: "scheduled-job"
+
+            # Pass schedule information to the job
+            - name: SCHEDULE_TIME
+              value: "0 * * * *"
+
+            ports:
+            - name: http
+              containerPort: 12911
+              protocol: TCP
+
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 5
+
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi

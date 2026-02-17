@@ -26,6 +26,9 @@ type Server struct {
 	// Health check handlers
 	healthCheckers []interfaces.HealthCheck
 
+	// State provider
+	stateProvider func() string
+
 	// Version info
 	version string
 
@@ -87,11 +90,16 @@ func (s *Server) RegisterHealthChecker(checker interfaces.HealthCheck) {
 	s.healthCheckers = append(s.healthCheckers, checker)
 }
 
+// SetStateProvider sets the function that provides the current state
+func (s *Server) SetStateProvider(provider func() string) {
+	s.stateProvider = provider
+}
+
 // Start starts the server
 func (s *Server) Start() error {
 	s.logger.Info().Int("port", s.config.Port).Msg("Starting API server")
 
-	if s.config.TLS != nil && s.config.TLS.Enabled {
+	if s.config.TLS.Enabled {
 		return s.server.ListenAndServeTLS(s.config.TLS.CertFile, s.config.TLS.KeyFile)
 	}
 
@@ -174,7 +182,16 @@ func (s *Server) handleHealth() http.HandlerFunc {
 // handleReady creates the readiness check handler
 func (s *Server) handleReady() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Simple ready check - if we're serving requests, we're ready
+		// Check state - ready only in "ready" or "executing" states
+		if s.stateProvider != nil {
+			state := s.stateProvider()
+			if state != "ready" && state != "executing" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("not ready: " + state))
+				return
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready"))
 	}
@@ -183,7 +200,16 @@ func (s *Server) handleReady() http.HandlerFunc {
 // handleLive creates the liveness check handler
 func (s *Server) handleLive() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Simple liveness check - if we're serving requests, we're alive
+		// Check state - alive unless stopped
+		if s.stateProvider != nil {
+			state := s.stateProvider()
+			if state == "stopped" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("stopped"))
+				return
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive"))
 	}

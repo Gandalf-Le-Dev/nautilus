@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nautilus-migration
+  labels:
+    app: nautilus
+    job-type: oneshot
+spec:
+  # Clean up completed pods after 1 hour
+  ttlSecondsAfterFinished: 3600
+
+  # Don't retry on failure - let Nautilus handle retries internally
+  backoffLimit: 0
+
+  template:
+    metadata:
+      labels:
+        app: nautilus
+        job-type: oneshot
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "12911"
+        prometheus.io/path: "/metrics"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 300  # 5 minutes for migrations
+
+      containers:
+      - name: nautilus
+        image: your-registry/nautilus-migration:latest
+        imagePullPolicy: Always
+
+        env:
+        - name: NAUTILUS_LOGGING_LEVEL
+          value: "info"
+        - name: NAUTILUS_JOB_NAME
+          value: "migration-job"
+        - name: MIGRATION_VERSION
+          value: "v1.0.0"
+
+        # Optional: mount database credentials from secret
+        # envFrom:
+        # - secretRef:
+        #     name: database-credentials
+
+        ports:
+        - name: http
+          containerPort: 12911
+          protocol: TCP
+
+        # Liveness probe for migration jobs
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 10  # Allow longer execution for migrations
+
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi

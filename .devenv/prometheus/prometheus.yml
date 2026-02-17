@@ -3,7 +3,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'nautilus-operator'
+  - job_name: 'nautilus-job'
     static_configs:
       - targets: ['host.docker.internal:12911']
     

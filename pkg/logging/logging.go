@@ -27,7 +27,7 @@ func Setup() {
 	// Add global fields
 	hostname, _ := os.Hostname()
 	log.Logger = log.With().
-		Str("service", os.Getenv("NAUTILUS_OPERATOR_NAME")).
+		Str("service", os.Getenv("NAUTILUS_JOB_NAME")).
 		Str("host", hostname).
 		Logger()
 

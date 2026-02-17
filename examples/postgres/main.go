@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/navica-dev/nautilus/core"
@@ -17,7 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var name = "postgres-operator"
+var name = "postgres-job"
 
 // Product represents a product in our database
 type Product struct {
@@ -28,8 +26,8 @@ type Product struct {
 	UpdatedAt time.Time
 }
 
-// PostgresOperator is an operator that interacts with PostgreSQL
-type PostgresOperator struct {
+// PostgresJob is a job that interacts with PostgreSQL
+type PostgresJob struct {
 	// Configuration
 	name        string
 	description string
@@ -62,25 +60,13 @@ func main() {
 		connString = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
 	}
 
-	// Create context with signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		cancel()
-	}()
-
 	pgConfig := plugin.PostgresPluginConfig{
-		Operator: name,
-		ConnString: connString,
-		MaxRetries: 5,
-		RetryDelay: 5 * time.Second,
-		MaxConns: 25,
-		MinConns: 5,
+		Job:             name,
+		ConnString:      connString,
+		MaxRetries:      5,
+		RetryDelay:      5 * time.Second,
+		MaxConns:        25,
+		MinConns:        5,
 		MaxConnIdleTime: 1 * time.Minute,
 		MaxConnLifetime: 5 * time.Minute,
 	}
@@ -88,16 +74,16 @@ func main() {
 	// Create PostgreSQL plugin
 	pgPlugin := plugin.NewPostgresPlugin(&pgConfig, "")
 
-	// Create operator
-	op := &PostgresOperator{
+	// Create job
+	op := &PostgresJob{
 		name:        name,
-		description: "PostgreSQL database operator example",
+		description: "PostgreSQL database job example",
 		pgPlugin:    pgPlugin,
 	}
 	op.dbConfig.connString = connString
 	op.dbConfig.tableName = "products"
 
-	// Create Nautilus instance
+	// Create Nautilus instance with lifecycle hooks
 	n, err := core.New(
 		core.WithConfigPath(configPath),
 		core.WithName(op.name),
@@ -109,23 +95,34 @@ func main() {
 		core.WithAPI(true, 12911),
 		core.WithMetrics(true),
 		core.WithMaxConsecutiveFailures(3),
+		core.WithGracePeriod(30*time.Second),
 		core.WithPlugin(pgPlugin), // Register the PostgreSQL plugin
+		core.WithOnRunStart(func(rc *core.RunContext) {
+			fmt.Printf("🔄 Starting database run #%d\n", rc.RunCount)
+		}),
+		core.WithOnRunComplete(func(rc *core.RunContext, err error) {
+			if err != nil {
+				fmt.Printf("❌ Run #%d failed: %v\n", rc.RunCount, err)
+			} else {
+				fmt.Printf("✅ Run #%d completed in %v\n", rc.RunCount, time.Since(rc.StartTime))
+			}
+		}),
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create Nautilus instance")
 	}
 
-	// Run operator
-	if err := n.Run(ctx, op); err != nil {
-		log.Fatal().Err(err).Msg("error running operator")
+	// Run job
+	if err := n.Run(context.Background(), op); err != nil {
+		log.Fatal().Err(err).Msg("error running job")
 	}
 }
 
-// Make sure PostgresOperator implements the Operator interface
-var _ interfaces.Operator = (*PostgresOperator)(nil)
+// Make sure PostgresJob implements the Job interface
+var _ interfaces.Job = (*PostgresJob)(nil)
 
-// Initialize prepares the operator for execution
-func (o *PostgresOperator) Initialize(ctx context.Context) error {
+// Setup prepares the job for execution
+func (o *PostgresJob) Setup(ctx context.Context) error {
 	o.runCount = 0
 	o.running = true
 
@@ -138,10 +135,14 @@ func (o *PostgresOperator) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// Run performs the operator's main task
-func (o *PostgresOperator) Run(ctx context.Context) error {
+// Execute performs the job's main task
+func (o *PostgresJob) Execute(ctx context.Context) error {
+	// Extract run context for enhanced logging
+	rc := core.RunContextFrom(ctx)
+	logger := rc.Logger
+
 	o.runCount++
-	log.Info().Int("run", o.runCount).Msg("Running PostgresOperator")
+	logger.Info().Msg("Running PostgresJob")
 
 	// 1. Fetch existing products
 	products, err := o.getAllProducts(ctx)
@@ -149,7 +150,7 @@ func (o *PostgresOperator) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to get products: %w", err)
 	}
 
-	log.Info().Int("product_count", len(products)).Msg("Retrieved products")
+	logger.Info().Int("product_count", len(products)).Msg("Retrieved products")
 
 	// 2. Create a new product (every 3rd run)
 	if o.runCount%3 == 0 {
@@ -163,7 +164,7 @@ func (o *PostgresOperator) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to create product: %w", err)
 		}
 
-		log.Info().Int("id", id).Str("name", newProduct.Name).Msg("Created new product")
+		logger.Info().Int("id", id).Str("name", newProduct.Name).Msg("Created new product")
 	}
 
 	// 3. Update a product if we have any (every 5th run)
@@ -178,7 +179,7 @@ func (o *PostgresOperator) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to update product: %w", err)
 		}
 
-		log.Info().Int("id", productToUpdate.ID).Str("name", productToUpdate.Name).Msg("Updated product")
+		logger.Info().Int("id", productToUpdate.ID).Str("name", productToUpdate.Name).Msg("Updated product")
 	}
 
 	// 4. Delete a product if we have more than 10 (every 7th run)
@@ -191,29 +192,29 @@ func (o *PostgresOperator) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to delete product: %w", err)
 		}
 
-		log.Info().Int("id", productToDelete.ID).Str("name", productToDelete.Name).Msg("Deleted product")
+		logger.Info().Int("id", productToDelete.ID).Str("name", productToDelete.Name).Msg("Deleted product")
 	}
 
 	return nil
 }
 
-// Terminate cleans up resources
-func (o *PostgresOperator) Terminate(ctx context.Context) error {
-	log.Info().Msg("Terminating PostgresOperator")
+// Teardown cleans up resources
+func (o *PostgresJob) Teardown(ctx context.Context) error {
+	log.Info().Msg("Terminating PostgresJob")
 	o.running = false
 	return nil
 }
 
 // Health check implementation
-var _ interfaces.HealthCheck = (*PostgresOperator)(nil)
+var _ interfaces.HealthCheck = (*PostgresJob)(nil)
 
-func (o *PostgresOperator) Name() string {
+func (o *PostgresJob) Name() string {
 	return name
 }
 
-func (o *PostgresOperator) HealthCheck(ctx context.Context) error {
+func (o *PostgresJob) HealthCheck(ctx context.Context) error {
 	if !o.running {
-		return fmt.Errorf("operator is not running")
+		return fmt.Errorf("job is not running")
 	}
 
 	// Check database connection
@@ -229,7 +230,7 @@ func (o *PostgresOperator) HealthCheck(ctx context.Context) error {
 // Database operations
 
 // ensureTableExists creates the products table if it doesn't exist
-func (o *PostgresOperator) ensureTableExists(ctx context.Context) error {
+func (o *PostgresJob) ensureTableExists(ctx context.Context) error {
 	query := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			id SERIAL PRIMARY KEY,
@@ -249,7 +250,7 @@ func (o *PostgresOperator) ensureTableExists(ctx context.Context) error {
 }
 
 // getAllProducts retrieves all products from the database
-func (o *PostgresOperator) getAllProducts(ctx context.Context) ([]Product, error) {
+func (o *PostgresJob) getAllProducts(ctx context.Context) ([]Product, error) {
 	query := fmt.Sprintf("SELECT id, name, price, created_at, updated_at FROM %s", o.dbConfig.tableName)
 
 	rows, err := o.pgPlugin.ExecuteQuery(ctx, query)
@@ -275,14 +276,19 @@ func (o *PostgresOperator) getAllProducts(ctx context.Context) ([]Product, error
 }
 
 // createProduct inserts a new product
-func (o *PostgresOperator) createProduct(ctx context.Context, product Product) (int, error) {
+func (o *PostgresJob) createProduct(ctx context.Context, product Product) (int, error) {
 	query := fmt.Sprintf(
 		"INSERT INTO %s (name, price, created_at, updated_at) VALUES ($1, $2, NOW(), NOW()) RETURNING id",
 		o.dbConfig.tableName,
 	)
 
 	var id int
-	err := o.pgPlugin.ExecuteQueryRow(ctx, query, product.Name, product.Price).Scan(&id)
+	row, err := o.pgPlugin.ExecuteQueryRow(ctx, query, product.Name, product.Price)
+	if err != nil {
+		return 0, err
+	}
+
+	err = row.Scan(&id)
 	if err != nil {
 		return 0, err
 	}
@@ -291,7 +297,7 @@ func (o *PostgresOperator) createProduct(ctx context.Context, product Product) (
 }
 
 // updateProduct updates an existing product
-func (o *PostgresOperator) updateProduct(ctx context.Context, product Product) error {
+func (o *PostgresJob) updateProduct(ctx context.Context, product Product) error {
 	query := fmt.Sprintf(
 		"UPDATE %s SET name = $1, price = $2, updated_at = NOW() WHERE id = $3",
 		o.dbConfig.tableName,
@@ -310,7 +316,7 @@ func (o *PostgresOperator) updateProduct(ctx context.Context, product Product) e
 }
 
 // deleteProduct removes a product
-func (o *PostgresOperator) deleteProduct(ctx context.Context, id int) error {
+func (o *PostgresJob) deleteProduct(ctx context.Context, id int) error {
 	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", o.dbConfig.tableName)
 
 	result, err := o.pgPlugin.ExecuteCommand(ctx, query, id)

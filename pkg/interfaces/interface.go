@@ -7,28 +7,28 @@ import (
 	"github.com/navica-dev/nautilus/pkg/enums"
 )
 
-// Core interface for implementing nautilus Operators
-type Operator interface {
-	// Initialize prepares the nautilus operator for execution
+// Core interface for implementing nautilus Jobs
+type Job interface {
+	// Setup prepares the nautilus job for execution
 	// It receives a context that may be used for cancellation
-	Initialize(ctx context.Context) error
+	Setup(ctx context.Context) error
 
-	// Run performs the operator's primary function
+	// Execute performs the job's primary function
 	// This method will be called either once or periodically depending on config
-	Run(ctx context.Context) error
+	Execute(ctx context.Context) error
 
-	// Terminate performs cleanup when the operator is shutting down
+	// Teardown performs cleanup when the job is shutting down
 	// This allows for graceful release of resources
-	Terminate(ctx context.Context) error
+	Teardown(ctx context.Context) error
 }
 
-// Configurable is an optional interface operators can implement for more complex configuraton needs
+// Configurable is an optional interface jobs can implement for more complex configuraton needs
 type Configurable interface {
-	// Configure allows a operator to configure itself from structured configuration
+	// Configure allows a job to configure itself from structured configuration
 	Configure(config map[string]any) error
 }
 
-// RunInfo provides informations about a operator's execution
+// RunInfo provides informations about a job's execution
 type RunInfo struct {
 	// RunID is a unique identifier for this execution
 	RunID string
@@ -45,13 +45,13 @@ type RunInfo struct {
 	Error error
 }
 
-// HealthCheck is an optional interface operators can implement
+// HealthCheck is an optional interface jobs can implement
 // to provide custom health status information
 type HealthCheck interface {
 	// Name returns the name of this health check component
 	Name() string
 
-	// HealthCheck reports on the health status of the operator
+	// HealthCheck reports on the health status of the job
 	// Returns nil if healthy, or an error describing the issue
 	HealthCheck(ctx context.Context) error
 }

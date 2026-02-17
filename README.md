@@ -1,6 +1,8 @@
 # Nautilus
 
-Nautilus is a Go framework for building and running reliable, observable operator services. It provides a structured way to create long-running services with built-in support for health checks, metrics, API endpoints, and database connections.
+**A lifecycle framework for Go workloads**
+
+Nautilus provides a clean, opinionated framework for building robust Go jobs with built-in observability, health checking, and lifecycle management. Whether you're building migrations, periodic sync jobs, or continuous queue consumers, Nautilus handles the infrastructure so you can focus on business logic.
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/navica-dev/nautilus)](https://goreportcard.com/report/github.com/navica-dev/nautilus)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -8,23 +10,15 @@ Nautilus is a Go framework for building and running reliable, observable operato
 
 ## Features
 
-- **Flexible Execution Models**: Run operators once, on a schedule, or at regular intervals
-- **Built-in Observability**:
-  - Health checks API endpoints
-  - Prometheus metrics integration
-  - Structured logging with zerolog
-  - Grafana dashboard templates
-- **Plugin System**: Extend functionality with database connectors and more
-- **Database Integration**: Ready-to-use PostgreSQL plugin
-- **Developer Experience**:
-  - Simple, expressive API
-  - Functional options pattern for configuration
-  - Comprehensive examples
-- **Runtime Management**:
-  - Graceful shutdown
-  - Resource cleanup
-  - Error handling
-  - Signal handling
+- 🎯 **Three execution modes**: OneShot, Periodic, Continuous
+- 🔄 **Automatic retries** with exponential backoff
+- 🏥 **Health checks** with liveness and readiness probes
+- 📊 **Prometheus metrics** out of the box
+- 🔌 **Plugin system** for reusable components
+- 🪝 **Lifecycle hooks** for custom instrumentation
+- 🛡️ **Graceful shutdown** with configurable grace periods
+- 🔍 **Structured logging** with zerolog
+- ☸️ **Kubernetes-ready** with example manifests
 
 ## Installation
 
@@ -34,194 +28,386 @@ go get github.com/navica-dev/nautilus
 
 ## Quick Start
 
-Here's a simple example of how to create a basic operator:
+Here's a minimal one-shot job:
 
 ```go
 package main
 
 import (
-	"context"
-	"log"
-	"time"
+    "context"
+    "fmt"
 
-	"github.com/navica-dev/nautilus"
-	"github.com/navica-dev/nautilus/pkg/interfaces"
+    "github.com/navica-dev/nautilus/core"
 )
 
-// SimpleOperator implements the interfaces.Operator interface
-var _ interfaces.Operator = (*SimpleOperator)(nil)
+type MyJob struct{}
 
-type SimpleOperator struct {
-	counter int
+func (m *MyJob) Setup(ctx context.Context) error {
+    fmt.Println("Initializing...")
+    return nil
 }
 
-func (op *SimpleOperator) Initialize(ctx context.Context) error {
-	op.counter = 0
-	return nil
+func (m *MyJob) Execute(ctx context.Context) error {
+    fmt.Println("Running job logic...")
+    return nil
 }
 
-func (op *SimpleOperator) Run(ctx context.Context) error {
-	op.counter++
-	log.Printf("Running operator for the %dth time", op.counter)
-	return nil
-}
-
-func (op *SimpleOperator) Terminate(ctx context.Context) error {
-	log.Printf("Terminating operator after %d runs", op.counter)
-	return nil
+func (m *MyJob) Teardown(ctx context.Context) error {
+    fmt.Println("Cleaning up...")
+    return nil
 }
 
 func main() {
-	ctx := context.Background()
+    n, _ := core.New(
+        core.WithName("my-job"),
+        core.WithOneShot(),
+    )
 
-	// Create Nautilus instance with options
-	n, err := nautilus.New(
-		nautilus.WithName("simple-operator"),
-		nautilus.WithDescription("A simple example operator"),
-		nautilus.WithVersion("0.1.0"),
-		nautilus.WithInterval(5*time.Second),
-		nautilus.WithAPI(true, 12911),
-		nautilus.WithMetrics(true),
-	)
-	if err != nil {
-		log.Fatalf("Failed to create Nautilus instance: %v", err)
-	}
-
-	// Create and run the operator
-	op := &SimpleOperator{}
-	if err := n.Run(ctx, op); err != nil {
-		log.Fatalf("Error running operator: %v", err)
-	}
+    n.Run(context.Background(), &MyJob{})
 }
 ```
+
+## Execution Modes
+
+Nautilus supports three distinct execution modes:
+
+### OneShot
+
+Execute once and exit. Perfect for migrations, cleanup tasks, or batch processing.
+
+```go
+n, _ := core.New(
+    core.WithName("migration-job"),
+    core.WithOneShot(),
+    core.WithTimeout(5*time.Minute),
+    core.WithRetry(2, 5*time.Second),
+)
+```
+
+### Periodic
+
+Execute repeatedly on a schedule using intervals or cron expressions.
+
+```go
+// Using interval
+n, _ := core.New(
+    core.WithName("sync-job"),
+    core.WithInterval(30*time.Second),
+    core.WithTimeout(25*time.Second),
+)
+
+// Using cron schedule
+n, _ := core.New(
+    core.WithName("hourly-job"),
+    core.WithSchedule("0 * * * *"),  // Every hour
+)
+```
+
+### Continuous
+
+Execute once and block indefinitely. Your `Execute()` method runs its own loop. Ideal for queue consumers and long-running processes.
+
+```go
+n, _ := core.New(
+    core.WithName("queue-consumer"),
+    core.WithContinuous(),
+    core.WithGracePeriod(30*time.Second),
+)
+
+func (m *MyJob) Execute(ctx context.Context) error {
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case msg := <-m.queue:
+            // Process message
+        }
+    }
+}
+```
+
+## RunContext
+
+Access execution metadata within your job:
+
+```go
+func (m *MyJob) Execute(ctx context.Context) error {
+    rc := core.RunContextFrom(ctx)
+
+    rc.Logger.Info().
+        Str("run_id", rc.RunID).
+        Int("run_count", rc.RunCount).
+        Msg("Processing data")
+
+    // Your logic here
+    return nil
+}
+```
+
+## Lifecycle Hooks
+
+Add custom instrumentation at key lifecycle points:
+
+```go
+n, _ := core.New(
+    core.WithName("my-job"),
+    core.WithOnRunStart(func(rc *core.RunContext) {
+        fmt.Printf("🚀 Run #%d started\n", rc.RunCount)
+        // Send to observability platform
+    }),
+    core.WithOnRunComplete(func(rc *core.RunContext, err error) {
+        if err != nil {
+            // Alert on failure
+        }
+    }),
+    core.WithOnShutdown(func() {
+        // Flush buffers, close connections
+    }),
+)
+```
+
+## Health Checks
+
+Implement the optional `HealthCheck` interface:
+
+```go
+func (m *MyJob) HealthCheck(ctx context.Context) error {
+    if m.queueBacklog > 1000 {
+        return fmt.Errorf("queue backlog too high: %d", m.queueBacklog)
+    }
+    return nil
+}
+
+func (m *MyJob) Name() string {
+    return "my-job"
+}
+```
+
+Health endpoints:
+- `/health` - Overall health status with component details
+- `/ready` - Ready to accept traffic (Ready or Executing states only)
+- `/live` - Process is alive (returns error only if Stopped)
+- `/metrics` - Prometheus metrics
 
 ## Configuration
 
-Nautilus can be configured through functional options:
+Nautilus can be configured via code, YAML files, or both:
 
 ```go
-n, err := nautilus.New(
-	// Basic configuration
-	nautilus.WithName("my-operator"),
-	nautilus.WithDescription("My custom operator"),
-	nautilus.WithVersion("1.0.0"),
-	
-	// Execution configuration
-	nautilus.WithInterval(30*time.Second),
-	// OR
-	nautilus.WithSchedule("*/5 * * * *"), // Cron expression
-	// OR
-	nautilus.WithRunOnce(false),
-	
-	// API configuration
-	nautilus.WithAPI(true, 12911),
-	
-	// Metrics configuration
-	nautilus.WithMetrics(true),
-	
-	// Logging configuration
-	nautilus.WithLogLevel(zerolog.LevelInfoValue),
-	nautilus.WithLogFormat(enums.LogFormatConsole),
-	
-	// Advanced configuration
-	nautilus.WithMaxConsecutiveFailures(3),
-	nautilus.WithTimeout(5*time.Minute),
+n, _ := core.New(
+    core.WithConfigPath("config.yaml"),  // Load from file
+    core.WithName("my-job"),              // Override file config
+    core.WithInterval(30*time.Second),
 )
 ```
 
-You can also use a configuration file:
+Example `config.yaml`:
+
+```yaml
+job:
+  name: data-sync-job
+  description: Synchronize data from external API
+
+execution:
+  mode: periodic
+  interval: 30s
+  timeout: 25s
+  maxRetries: 2
+  retryBackoff: 5s
+
+api:
+  enabled: true
+  port: 12911
+
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    path: /metrics
+
+health:
+  checkInterval: 30s
+  maxConsecutiveFailures: 3
+
+shutdown:
+  gracePeriod: 60s
+```
+
+## Plugins
+
+Nautilus includes a PostgreSQL plugin for common database operations:
 
 ```go
-nautilus.WithConfigPath("./config.yaml")
+import plugin "github.com/navica-dev/nautilus/plugins/database"
+
+pgConfig := plugin.PostgresPluginConfig{
+    Job:        "my-job",
+    ConnString: "postgres://user:pass@localhost:5432/db",
+    MaxConns:   25,
+}
+
+pgPlugin := plugin.NewPostgresPlugin(&pgConfig, "namespace")
+
+n, _ := core.New(
+    core.WithName("db-job"),
+    core.WithPlugin(pgPlugin),
+)
 ```
+
+The PostgreSQL plugin provides:
+- Connection pooling with pgx
+- Health checking
+- Automatic Prometheus metrics (connections, query duration, errors)
+- Query helpers and transaction support
+
+## Kubernetes Deployment
+
+Nautilus jobs are Kubernetes-native with proper health checks and graceful shutdown.
+
+### Periodic Job (Deployment)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nautilus-periodic
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: nautilus
+        image: your-registry/nautilus-job:latest
+        ports:
+        - containerPort: 12911
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 12911
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 12911
+```
+
+### OneShot Job
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nautilus-migration
+spec:
+  backoffLimit: 0  # Nautilus handles retries
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: nautilus
+        image: your-registry/nautilus-migration:latest
+```
+
+### CronJob
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nautilus-scheduled
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: nautilus
+            image: your-registry/nautilus-job:latest
+```
+
+See the [`deploy/`](./deploy) directory for complete examples including StatefulSets for consumers.
 
 ## Examples
 
-The repository includes several examples:
+The [`examples/`](./examples) directory contains complete working examples:
 
-### Basic Example
+- **[oneshot](./examples/oneshot)** - Database migration job
+- **[periodic](./examples/periodic)** - Data synchronization job with interval
+- **[consumer](./examples/consumer)** - Queue consumer using continuous mode
+- **[postgres](./examples/postgres)** - Database operations with the PostgreSQL plugin
 
-A simple operator that runs periodically and simulates work.
-
-```bash
-go run examples/basic/main.go
-```
-
-### PostgreSQL Example
-
-An operator that interacts with a PostgreSQL database.
+To run an example:
 
 ```bash
-go run examples/postgres/main.go
+# Start dependencies
+docker compose -f .devenv/docker-compose.yml up -d
+
+# Run example
+go run ./examples/periodic/main.go
 ```
 
-## Advanced Usage
+## Testing
 
-### Creating Custom Plugins
-
-Nautilus supports a plugin system to extend functionality. Here's how to create a custom plugin:
+Nautilus provides a test helper for synchronous job execution:
 
 ```go
-type MyPlugin struct {
-	// Your plugin fields
-}
+import "github.com/navica-dev/nautilus/pkg/nautilustest"
 
-var _ plugin.Plugin = (*MyPlugin)(nil)
+func TestMyJob(t *testing.T) {
+    job := &MyJob{}
 
-func (p *MyPlugin) Name() string {
-	return "my-plugin"
-}
+    result, err := nautilustest.RunJob(
+        context.Background(),
+        job,
+        core.WithName("test-job"),
+        core.WithTimeout(5*time.Second),
+    )
 
-func (p *MyPlugin) Initialize(ctx context.Context) error {
-	// Initialize your plugin
-	return nil
-}
+    if err != nil {
+        t.Fatalf("Job failed: %v", err)
+    }
 
-func (p *MyPlugin) Terminate(ctx context.Context) error {
-	// Clean up resources
-	return nil
-}
-
-// Then register it with Nautilus
-n, err := nautilus.New(
-	// ... other options
-	nautilus.WithPlugin(&MyPlugin{}),
-)
-```
-
-### Health Checks
-
-Implement the `interfaces.HealthCheck` interface to provide custom health information:
-
-```go
-var _ interfaces.HealthCheck = (*MyOperator)(nil)
-
-func (op *MyOperator) Name() string {
-	return "my-operator"
-}
-
-func (op *MyOperator) HealthCheck(ctx context.Context) error {
-	// If healthy, return nil
-	if op.isHealthy() {
-		return nil
-	}
-	// If unhealthy, return an error
-	return errors.New("operator is not healthy")
+    if result.ExecuteDuration > 1*time.Second {
+        t.Errorf("Job too slow: %v", result.ExecuteDuration)
+    }
 }
 ```
 
-### Parallel Execution
+## Observability
 
-Nautilus provides support for parallel execution:
+### Metrics
+
+Nautilus exposes Prometheus metrics at `/metrics`:
+
+- `nautilus_job_runs_total{job, status}` - Total job executions
+- `nautilus_job_duration_seconds{job, status}` - Execution duration
+- `nautilus_job_errors_total{job}` - Error count
+- Plugin metrics (e.g., PostgreSQL connection pool, query performance)
+
+### Logging
+
+Structured JSON logs via zerolog:
+
+```json
+{
+  "level": "info",
+  "component": "nautilus-core",
+  "job": "sync-job",
+  "run": 42,
+  "run_id": "uuid",
+  "time": "2026-02-17T12:00:00Z",
+  "message": "Job run completed"
+}
+```
+
+### State Tracking
+
+Monitor job lifecycle state:
 
 ```go
-func (op *MyOperator) Run(ctx context.Context) error {
-	// Execute multiple tasks in parallel
-	return n.ExecuteParallel(ctx, func(ctx context.Context) error {
-		// Task logic here
-		return nil
-	})
-}
+state := n.GetState()  // Created, Initializing, Ready, Executing, ShuttingDown, Stopped
 ```
 
 ## Development Setup
@@ -229,7 +415,7 @@ func (op *MyOperator) Run(ctx context.Context) error {
 ### Prerequisites
 
 - Go 1.24+
-- Docker and Docker Compose (for running PostgreSQL examples)
+- Docker and Docker Compose (for running examples)
 
 ### Setting Up the Development Environment
 
@@ -256,10 +442,28 @@ func (op *MyOperator) Run(ctx context.Context) error {
 3. Run examples:
 
    ```bash
-   go run examples/basic/main.go
-   # or
-   go run examples/postgres/main.go
+   go run examples/periodic/main.go
    ```
+
+4. Run tests:
+
+   ```bash
+   go test ./...
+   ```
+
+## Architecture
+
+Nautilus follows a clean architecture with clear separation of concerns:
+
+- **Core**: Lifecycle orchestration, scheduling, state management
+- **Interfaces**: Clean contracts for jobs and plugins
+- **Plugins**: Reusable components (database, messaging, etc.)
+- **API**: Health checks and metrics endpoints
+- **Config**: YAML-based configuration with programmatic overrides
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request.
 
 ## License
 

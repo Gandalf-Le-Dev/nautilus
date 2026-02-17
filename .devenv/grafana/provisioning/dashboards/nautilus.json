@@ -106,13 +106,13 @@
               "uid": "${DS_PROMETHEUS}"
             },
             "editorMode": "code",
-            "expr": "nautilus_operator_runs_total",
+            "expr": "nautilus_job_runs_total",
             "legendFormat": "{{status}}",
             "range": true,
             "refId": "A"
           }
         ],
-        "title": "Operator Runs",
+        "title": "Job Runs",
         "type": "timeseries"
       },
       {
@@ -199,13 +199,13 @@
               "uid": "${DS_PROMETHEUS}"
             },
             "editorMode": "code",
-            "expr": "rate(nautilus_operator_run_duration_seconds_sum[5m])/rate(nautilus_operator_run_duration_seconds_count[5m])",
+            "expr": "rate(nautilus_job_run_duration_seconds_sum[5m])/rate(nautilus_job_run_duration_seconds_count[5m])",
             "legendFormat": "Average Duration",
             "range": true,
             "refId": "A"
           }
         ],
-        "title": "Operator Run Duration",
+        "title": "Job Run Duration",
         "type": "timeseries"
       },
       {

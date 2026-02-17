@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ type PostgresPlugin struct {
 }
 
 type PostgresPluginConfig struct {
-	Operator        string        `json:"operator"`
+	Job             string        `json:"job"`
 	ConnString      string        `json:"connString"`
 	MaxRetries      int           `json:"maxRetries"`
 	RetryDelay      time.Duration `json:"retryDelay"`
@@ -38,8 +39,8 @@ type PostgresPluginConfig struct {
 }
 
 func (c *PostgresPluginConfig) validate() error {
-	if c.Operator == "" {
-		return fmt.Errorf("operator is required")
+	if c.Job == "" {
+		return fmt.Errorf("job is required")
 	}
 
 	if c.ConnString == "" {
@@ -84,7 +85,14 @@ func NewPostgresPlugin(config *PostgresPluginConfig, namespace string) *Postgres
 }
 
 func extractDBName(connString string) string {
-	// Look for dbname parameter in the connection string
+	// Try URI format first (postgres://host/dbname)
+	if u, err := url.Parse(connString); err == nil && u.Scheme != "" {
+		if path := strings.TrimPrefix(u.Path, "/"); path != "" {
+			return path
+		}
+	}
+
+	// Fall back to key-value format (dbname=x)
 	if parts := strings.Split(connString, " "); len(parts) > 0 {
 		for _, part := range parts {
 			if strings.HasPrefix(part, "dbname=") {
@@ -118,7 +126,7 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 	// Parse the connection config
 	config, err := pgxpool.ParseConfig(p.config.ConnString)
 	if err != nil {
-		p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "parse_config")
+		p.metrics.ConnectionError(p.config.Job, p.config.dbName, "parse_config")
 		return fmt.Errorf("failed to parse PostgreSQL connection string: %w", err)
 	}
 
@@ -128,7 +136,7 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 	config.MaxConnIdleTime = p.config.MaxConnIdleTime
 
 	config.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
-		p.metrics.PoolConnectionRequest(p.config.Operator, p.config.dbName)
+		p.metrics.PoolConnectionRequest(p.config.Job, p.config.dbName)
 		return true
 	}
 
@@ -138,16 +146,16 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 		acquireStartTime := time.Now()
 		pool, err = pgxpool.NewWithConfig(ctx, config)
 		acquireDuration := time.Since(acquireStartTime).Seconds()
-		p.metrics.ObserveConnectionAcquireTime(p.config.Operator, p.config.dbName, acquireDuration)
+		p.metrics.ObserveConnectionAcquireTime(p.config.Job, p.config.dbName, acquireDuration)
 
 		if err != nil {
-			p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "create_pool")
+			p.metrics.ConnectionError(p.config.Job, p.config.dbName, "create_pool")
 			log.Error().Err(err).Int("attempt", i+1).Msg("Failed to create PostgreSQL connection pool")
 			select {
 			case <-time.After(p.config.RetryDelay):
 				// Retry after delay
 			case <-ctx.Done():
-				p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "context_cancelled")
+				p.metrics.ConnectionError(p.config.Job, p.config.dbName, "context_cancelled")
 				return fmt.Errorf("context cancelled while connecting to PostgreSQL: %w", ctx.Err())
 			}
 			continue
@@ -157,7 +165,7 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 		pingStartTime := time.Now()
 		err = pool.Ping(ctx)
 		pingDuration := time.Since(pingStartTime).Seconds()
-		p.metrics.ObservePingDuration(p.config.Operator, p.config.dbName, pingDuration)
+		p.metrics.ObservePingDuration(p.config.Job, p.config.dbName, pingDuration)
 
 		if err == nil {
 			break // Successfully connected
@@ -165,22 +173,19 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 
 		log.Error().Err(err).Int("attempt", i+1).Msg("Failed to ping PostgreSQL")
 		pool.Close()
-
-		p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "ping_failed")
-		log.Error().Err(err).Int("attempt", i+1).Msg("Failed to ping PostgreSQL")
-		pool.Close()
+		p.metrics.ConnectionError(p.config.Job, p.config.dbName, "ping_failed")
 
 		select {
 		case <-time.After(p.config.RetryDelay):
 			// Retry after delay
 		case <-ctx.Done():
-			p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "context_cancelled")
+			p.metrics.ConnectionError(p.config.Job, p.config.dbName, "context_cancelled")
 			return fmt.Errorf("context cancelled while testing PostgreSQL connection: %w", ctx.Err())
 		}
 	}
 
 	if err != nil {
-		p.metrics.ConnectionError(p.config.Operator, p.config.dbName, "max_retries_exceeded")
+		p.metrics.ConnectionError(p.config.Job, p.config.dbName, "max_retries_exceeded")
 		return fmt.Errorf("failed to connect to PostgreSQL after %d attempts: %w", p.config.MaxRetries, err)
 	}
 
@@ -188,10 +193,10 @@ func (p *PostgresPlugin) Connect(ctx context.Context) error {
 	p.connected = true
 
 	stats := pool.Stat()
-	p.metrics.SetPoolTotalConnections(p.config.Operator, p.config.dbName, int(stats.TotalConns()))
-	p.metrics.SetPoolActiveConnections(p.config.Operator, p.config.dbName, int(stats.AcquiredConns()))
-	p.metrics.SetPoolIdleConnections(p.config.Operator, p.config.dbName, int(stats.IdleConns()))
-	p.metrics.SetPoolMaxConnections(p.config.Operator, p.config.dbName, int(config.MaxConns))
+	p.metrics.SetPoolTotalConnections(p.config.Job, p.config.dbName, int(stats.TotalConns()))
+	p.metrics.SetPoolActiveConnections(p.config.Job, p.config.dbName, int(stats.AcquiredConns()))
+	p.metrics.SetPoolIdleConnections(p.config.Job, p.config.dbName, int(stats.IdleConns()))
+	p.metrics.SetPoolMaxConnections(p.config.Job, p.config.dbName, int(config.MaxConns))
 
 	connectDuration := time.Since(startTime).Seconds()
 	log.Info().Float64("duration_seconds", connectDuration).Msg("Connected to PostgreSQL")
@@ -206,9 +211,9 @@ func (p *PostgresPlugin) Disconnect(ctx context.Context) error {
 		p.pool = nil
 
 		// Reset connection metrics
-		p.metrics.SetPoolTotalConnections(p.config.Operator, p.config.dbName, 0)
-		p.metrics.SetPoolActiveConnections(p.config.Operator, p.config.dbName, 0)
-		p.metrics.SetPoolIdleConnections(p.config.Operator, p.config.dbName, 0)
+		p.metrics.SetPoolTotalConnections(p.config.Job, p.config.dbName, 0)
+		p.metrics.SetPoolActiveConnections(p.config.Job, p.config.dbName, 0)
+		p.metrics.SetPoolIdleConnections(p.config.Job, p.config.dbName, 0)
 	}
 	return nil
 }
@@ -216,17 +221,17 @@ func (p *PostgresPlugin) Disconnect(ctx context.Context) error {
 // Ping verifies the database connection is alive
 func (p *PostgresPlugin) Ping(ctx context.Context) error {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "ping", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "ping", "not_connected")
 		return fmt.Errorf("not connected to PostgreSQL")
 	}
 
 	startTime := time.Now()
 	err := p.pool.Ping(ctx)
 	duration := time.Since(startTime).Seconds()
-	p.metrics.ObservePingDuration(p.config.Operator, p.config.dbName, duration)
+	p.metrics.ObservePingDuration(p.config.Job, p.config.dbName, duration)
 
 	if err != nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "ping", "failed")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "ping", "failed")
 	}
 
 	return err
@@ -241,9 +246,9 @@ func (p *PostgresPlugin) GetPool() *pgxpool.Pool {
 func (p *PostgresPlugin) UpdatePoolMetrics() {
 	if p.pool != nil {
 		stats := p.pool.Stat()
-		p.metrics.SetPoolTotalConnections(p.config.Operator, p.config.dbName, int(stats.TotalConns()))
-		p.metrics.SetPoolActiveConnections(p.config.Operator, p.config.dbName, int(stats.AcquiredConns()))
-		p.metrics.SetPoolIdleConnections(p.config.Operator, p.config.dbName, int(stats.IdleConns()))
+		p.metrics.SetPoolTotalConnections(p.config.Job, p.config.dbName, int(stats.TotalConns()))
+		p.metrics.SetPoolActiveConnections(p.config.Job, p.config.dbName, int(stats.AcquiredConns()))
+		p.metrics.SetPoolIdleConnections(p.config.Job, p.config.dbName, int(stats.IdleConns()))
 	}
 }
 
@@ -322,7 +327,7 @@ func determineQueryType(query string) string {
 // ExecuteQuery executes a query and returns rows
 func (p *PostgresPlugin) ExecuteQuery(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "query", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "query", "not_connected")
 		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
@@ -334,13 +339,13 @@ func (p *PostgresPlugin) ExecuteQuery(ctx context.Context, query string, args ..
 	duration := time.Since(startTime).Seconds()
 
 	// Update metrics
-	p.metrics.ObserveQueryDuration(p.config.Operator, p.config.dbName, queryType, tableName, duration)
+	p.metrics.ObserveQueryDuration(p.config.Job, p.config.dbName, queryType, tableName, duration)
 
 	if err != nil {
-		p.metrics.QueryTotal(p.config.Operator, p.config.dbName, queryType, "error")
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "query", "execution_failed")
+		p.metrics.QueryTotal(p.config.Job, p.config.dbName, queryType, "error")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "query", "execution_failed")
 	} else {
-		p.metrics.QueryTotal(p.config.Operator, p.config.dbName, queryType, "success")
+		p.metrics.QueryTotal(p.config.Job, p.config.dbName, queryType, "success")
 	}
 
 	p.UpdatePoolMetrics()
@@ -349,10 +354,10 @@ func (p *PostgresPlugin) ExecuteQuery(ctx context.Context, query string, args ..
 }
 
 // ExecuteQueryRow executes a query and returns a single row
-func (p *PostgresPlugin) ExecuteQueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+func (p *PostgresPlugin) ExecuteQueryRow(ctx context.Context, query string, args ...any) (pgx.Row, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "query_row", "not_connected")
-		return nil
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "query_row", "not_connected")
+		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
 	queryType := determineQueryType(query)
@@ -363,18 +368,18 @@ func (p *PostgresPlugin) ExecuteQueryRow(ctx context.Context, query string, args
 	duration := time.Since(startTime).Seconds()
 
 	// Update metrics
-	p.metrics.ObserveQueryDuration(p.config.Operator, p.config.dbName, queryType, tableName, duration)
-	p.metrics.QueryTotal(p.config.Operator, p.config.dbName, queryType, "success")
+	p.metrics.ObserveQueryDuration(p.config.Job, p.config.dbName, queryType, tableName, duration)
+	p.metrics.QueryTotal(p.config.Job, p.config.dbName, queryType, "success")
 
 	p.UpdatePoolMetrics()
 
-	return row
+	return row, nil
 }
 
 // ExecuteCommand executes a command and returns the number of affected rows
 func (p *PostgresPlugin) ExecuteCommand(ctx context.Context, command string, args ...any) (int64, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "exec", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "exec", "not_connected")
 		return 0, fmt.Errorf("not connected to PostgreSQL")
 	}
 
@@ -386,18 +391,18 @@ func (p *PostgresPlugin) ExecuteCommand(ctx context.Context, command string, arg
 	duration := time.Since(startTime).Seconds()
 
 	// Update metrics
-	p.metrics.ObserveQueryDuration(p.config.Operator, p.config.dbName, queryType, tableName, duration)
+	p.metrics.ObserveQueryDuration(p.config.Job, p.config.dbName, queryType, tableName, duration)
 
 	if err != nil {
-		p.metrics.QueryTotal(p.config.Operator, p.config.dbName, queryType, "error")
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "exec", "execution_failed")
+		p.metrics.QueryTotal(p.config.Job, p.config.dbName, queryType, "error")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "exec", "execution_failed")
 		return 0, err
 	}
 
-	p.metrics.QueryTotal(p.config.Operator, p.config.dbName, queryType, "success")
+	p.metrics.QueryTotal(p.config.Job, p.config.dbName, queryType, "success")
 	rowsAffected := result.RowsAffected()
 	if rowsAffected > 0 {
-		p.metrics.RowsProcessed(p.config.Operator, p.config.dbName, queryType, tableName, int(rowsAffected))
+		p.metrics.RowsProcessed(p.config.Job, p.config.dbName, queryType, tableName, int(rowsAffected))
 	}
 
 	p.UpdatePoolMetrics()
@@ -408,7 +413,7 @@ func (p *PostgresPlugin) ExecuteCommand(ctx context.Context, command string, arg
 // CreateTransaction starts a new transaction
 func (p *PostgresPlugin) CreateTransaction(ctx context.Context) (pgx.Tx, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "transaction", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "transaction", "not_connected")
 		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
@@ -417,14 +422,14 @@ func (p *PostgresPlugin) CreateTransaction(ctx context.Context) (pgx.Tx, error) 
 	duration := time.Since(startTime).Seconds()
 
 	// Update metrics
-	p.metrics.ObserveTransactionDuration(p.config.Operator, p.config.dbName, duration)
+	p.metrics.ObserveTransactionDuration(p.config.Job, p.config.dbName, duration)
 
 	if err != nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "transaction_begin", "failed")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "transaction_begin", "failed")
 		return nil, err
 	}
 
-	p.metrics.TransactionTotal(p.config.Operator, p.config.dbName, "started")
+	p.metrics.TransactionTotal(p.config.Job, p.config.dbName, "started")
 
 	// Update connection pool metrics
 	p.UpdatePoolMetrics()
@@ -434,7 +439,7 @@ func (p *PostgresPlugin) CreateTransaction(ctx context.Context) (pgx.Tx, error) 
 		Tx:        tx,
 		metrics:   p.metrics,
 		dbName:    p.config.dbName,
-		operator:  p.config.Operator,
+		job:  p.config.Job,
 		plugin:    p,
 		startTime: startTime,
 	}, nil
@@ -445,7 +450,7 @@ type instrumentedTx struct {
 	pgx.Tx
 	metrics   *PostgresMetrics
 	dbName    string
-	operator  string
+	job       string
 	plugin    *PostgresPlugin
 	startTime time.Time
 }
@@ -456,11 +461,11 @@ func (tx *instrumentedTx) Commit(ctx context.Context) error {
 	duration := time.Since(tx.startTime).Seconds()
 
 	if err != nil {
-		tx.metrics.TransactionTotal(tx.operator, tx.dbName, "commit_error")
-		tx.metrics.OperationError(tx.operator, tx.dbName, "transaction_commit", "failed")
+		tx.metrics.TransactionTotal(tx.job, tx.dbName, "commit_error")
+		tx.metrics.OperationError(tx.job, tx.dbName, "transaction_commit", "failed")
 	} else {
-		tx.metrics.TransactionTotal(tx.operator, tx.dbName, "committed")
-		tx.metrics.ObserveTransactionDuration(tx.operator, tx.dbName, duration)
+		tx.metrics.TransactionTotal(tx.job, tx.dbName, "committed")
+		tx.metrics.ObserveTransactionDuration(tx.job, tx.dbName, duration)
 	}
 
 	// Update connection pool metrics
@@ -475,11 +480,11 @@ func (tx *instrumentedTx) Rollback(ctx context.Context) error {
 	duration := time.Since(tx.startTime).Seconds()
 
 	if err != nil {
-		tx.metrics.OperationError(tx.operator, tx.dbName, "transaction_rollback", "failed")
+		tx.metrics.OperationError(tx.job, tx.dbName, "transaction_rollback", "failed")
 	} else {
-		tx.metrics.TransactionTotal(tx.operator, tx.dbName, "rolled_back")
-		tx.metrics.TransactionRollback(tx.operator, tx.dbName, "explicit")
-		tx.metrics.ObserveTransactionDuration(tx.operator, tx.dbName, duration)
+		tx.metrics.TransactionTotal(tx.job, tx.dbName, "rolled_back")
+		tx.metrics.TransactionRollback(tx.job, tx.dbName, "explicit")
+		tx.metrics.ObserveTransactionDuration(tx.job, tx.dbName, duration)
 	}
 
 	// Update connection pool metrics
@@ -491,12 +496,12 @@ func (tx *instrumentedTx) Rollback(ctx context.Context) error {
 // BatchOperations executes multiple operations in a batch
 func (p *PostgresPlugin) BatchOperations(ctx context.Context) (*pgx.Batch, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "batch", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "batch", "not_connected")
 		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
 	batch := &pgx.Batch{}
-	p.metrics.BatchOperationTotal(p.config.Operator, p.config.dbName)
+	p.metrics.BatchOperationTotal(p.config.Job, p.config.dbName)
 
 	return batch, nil
 }
@@ -504,20 +509,20 @@ func (p *PostgresPlugin) BatchOperations(ctx context.Context) (*pgx.Batch, error
 // ExecuteBatch executes a batch of operations
 func (p *PostgresPlugin) ExecuteBatch(ctx context.Context, batch *pgx.Batch) (pgx.BatchResults, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "batch_exec", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "batch_exec", "not_connected")
 		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
 	// Record batch size
 	batchSize := batch.Len()
-	p.metrics.ObserveBatchSize(p.config.Operator, p.config.dbName, batchSize)
+	p.metrics.ObserveBatchSize(p.config.Job, p.config.dbName, batchSize)
 
 	startTime := time.Now()
 	batchResults := p.pool.SendBatch(ctx, batch)
 	duration := time.Since(startTime).Seconds()
 
 	// Update metrics
-	p.metrics.ObserveBatchOperationDuration(p.config.Operator, p.config.dbName, duration)
+	p.metrics.ObserveBatchOperationDuration(p.config.Job, p.config.dbName, duration)
 
 	p.UpdatePoolMetrics()
 
@@ -527,7 +532,7 @@ func (p *PostgresPlugin) ExecuteBatch(ctx context.Context, batch *pgx.Batch) (pg
 // CopyFrom efficiently copies data from a source to a table
 func (p *PostgresPlugin) CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
 	if p.pool == nil {
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "copy_from", "not_connected")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "copy_from", "not_connected")
 		return 0, fmt.Errorf("not connected to PostgreSQL")
 	}
 
@@ -537,16 +542,16 @@ func (p *PostgresPlugin) CopyFrom(ctx context.Context, tableName pgx.Identifier,
 	rowsAffected, err := p.pool.CopyFrom(ctx, tableName, columnNames, rowSrc)
 	duration := time.Since(startTime).Seconds()
 
-	p.metrics.ObserveCopyDuration(p.config.Operator, p.config.dbName, table, duration)
+	p.metrics.ObserveCopyDuration(p.config.Job, p.config.dbName, table, duration)
 
 	if err != nil {
-		p.metrics.CopyOperationTotal(p.config.Operator, p.config.dbName, table, "error")
-		p.metrics.OperationError(p.config.Operator, p.config.dbName, "copy_from", "failed")
+		p.metrics.CopyOperationTotal(p.config.Job, p.config.dbName, table, "error")
+		p.metrics.OperationError(p.config.Job, p.config.dbName, "copy_from", "failed")
 		return 0, err
 	}
 
-	p.metrics.CopyOperationTotal(p.config.Operator, p.config.dbName, table, "success")
-	p.metrics.CopyRowsProcessed(p.config.Operator, p.config.dbName, table, rowsAffected)
+	p.metrics.CopyOperationTotal(p.config.Job, p.config.dbName, table, "success")
+	p.metrics.CopyRowsProcessed(p.config.Job, p.config.dbName, table, rowsAffected)
 
 	p.UpdatePoolMetrics()
 
@@ -556,20 +561,20 @@ func (p *PostgresPlugin) CopyFrom(ctx context.Context, tableName pgx.Identifier,
 // Listen establishes a LISTEN/NOTIFY connection
 func (p *PostgresPlugin) Listen(ctx context.Context, channel string) (*pgx.Conn, error) {
 	if p.pool == nil {
-		p.metrics.ListenerError(p.config.Operator, p.config.dbName, channel, "not_connected")
+		p.metrics.ListenerError(p.config.Job, p.config.dbName, channel, "not_connected")
 		return nil, fmt.Errorf("not connected to PostgreSQL")
 	}
 
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
-		p.metrics.ListenerError(p.config.Operator, p.config.dbName, channel, "acquire_connection")
+		p.metrics.ListenerError(p.config.Job, p.config.dbName, channel, "acquire_connection")
 		return nil, fmt.Errorf("failed to acquire connection for LISTEN: %w", err)
 	}
 
 	_, err = conn.Exec(ctx, fmt.Sprintf("LISTEN %s", channel))
 	if err != nil {
 		conn.Release()
-		p.metrics.ListenerError(p.config.Operator, p.config.dbName, channel, "listen_command")
+		p.metrics.ListenerError(p.config.Job, p.config.dbName, channel, "listen_command")
 		return nil, fmt.Errorf("failed to LISTEN on channel %s: %w", channel, err)
 	}
 
@@ -580,7 +585,7 @@ func (p *PostgresPlugin) Listen(ctx context.Context, channel string) (*pgx.Conn,
 
 // HandleNotification should be called when a notification is received
 func (p *PostgresPlugin) HandleNotification(channel string) {
-	p.metrics.NotificationReceived(p.config.Operator, p.config.dbName, channel)
+	p.metrics.NotificationReceived(p.config.Job, p.config.dbName, channel)
 }
 
 var _ plugin.DatabasePlugin = (*PostgresPlugin)(nil)

@@ -1,234 +1,179 @@
 package config
 
 import (
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/navica-dev/nautilus/pkg/enums"
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // Config represents the complete configuration for Nautilus
 type Config struct {
-	Operator  *OperatorConfig  `mapstructure:"operator"`
-	Execution *ExecutionConfig `mapstructure:"execution"`
-	API       *APIConfig       `mapstructure:"api"`
-	Logging   *LoggingConfig   `mapstructure:"logging"`
-	Metrics   *MetricsConfig   `mapstructure:"metrics"`
-	Secrets   *SecretsConfig   `mapstructure:"secrets"`
-	Health    *HealthConfig    `mapstructure:"health"`
+	Job       JobConfig       `yaml:"job"`
+	Execution ExecutionConfig `yaml:"execution"`
+	API       APIConfig       `yaml:"api"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Secrets   SecretsConfig   `yaml:"secrets"`
+	Health    HealthConfig    `yaml:"health"`
+	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 }
 
-// OperatorConfig contains operator-specific configuration
-type OperatorConfig struct {
-	Name        string                 `mapstructure:"name"`
-	Description string                 `mapstructure:"description"`
-	Parameters  map[string]interface{} `mapstructure:"parameters"`
+// JobConfig contains job-specific configuration
+type JobConfig struct {
+	Name        string                 `yaml:"name"`
+	Description string                 `yaml:"description"`
+	Parameters  map[string]interface{} `yaml:"parameters"`
 }
 
-// ExecutionConfig controls how the operator is executed
+// ExecutionConfig controls how the job is executed
 type ExecutionConfig struct {
-	// Schedule using cron expression (takes precedence over Interval if set)
-	Schedule string `mapstructure:"schedule"`
+	// Mode specifies the execution mode (oneshot, periodic, continuous)
+	Mode enums.ExecutionMode `yaml:"mode"`
 
-	// Simple interval for periodic execution
-	Interval time.Duration `mapstructure:"interval"`
+	// Schedule using cron expression (only for ModePeriodic)
+	Schedule string `yaml:"schedule"`
 
-	// RunOnce executes the operator once and then stops
-	RunOnce bool `mapstructure:"runOnce"`
+	// Interval for periodic execution (only for ModePeriodic)
+	Interval time.Duration `yaml:"interval"`
 
-	// WaitAfterCompletion keeps the process running after completion
-	WaitAfterCompletion bool `mapstructure:"waitAfterCompletion"`
+	// Timeout for each execution
+	Timeout time.Duration `yaml:"timeout"`
 
-	// Parallel execution settings
-	Parallel *ParallelConfig `mapstructure:"parallel"`
-
-	// Timeout for each execution of the Run method
-	Timeout time.Duration `mapstructure:"timeout"`
-}
-
-// ParallelConfig controls parallel execution settings
-type ParallelConfig struct {
-	Workers    int `mapstructure:"workers"`
-	BufferSize int `mapstructure:"bufferSize"`
+	// Retry configuration
+	MaxRetries   int           `yaml:"maxRetries"`
+	RetryBackoff time.Duration `yaml:"retryBackoff"`
 }
 
 // APIConfig controls the HTTP API server
 type APIConfig struct {
-	Enabled   bool       `mapstructure:"enabled"`
-	Port      int        `mapstructure:"port"`
-	Path      string     `mapstructure:"path"`
-	DebugMode bool       `mapstructure:"debugMode"`
-	TLS       *TLSConfig `mapstructure:"tls"`
+	Enabled   bool      `yaml:"enabled"`
+	Port      int       `yaml:"port"`
+	Path      string    `yaml:"path"`
+	DebugMode bool      `yaml:"debugMode"`
+	TLS       TLSConfig `yaml:"tls"`
 }
 
 // TLSConfig contains TLS configuration for the API server
 type TLSConfig struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	CertFile string `mapstructure:"certFile"`
-	KeyFile  string `mapstructure:"keyFile"`
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"certFile"`
+	KeyFile  string `yaml:"keyFile"`
 }
 
 // LoggingConfig controls logging behavior
 type LoggingConfig struct {
-	Level  string              `mapstructure:"level"`
-	Format enums.LogFormatEnum `mapstructure:"format"` // json, console
+	Level  string              `yaml:"level"`
+	Format enums.LogFormatEnum `yaml:"format"` // json, console
 }
 
 // MetricsConfig controls metrics collection
 type MetricsConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-
-	Prometheus *PrometheusConfig `mapstructure:"prometheus"`
+	Enabled    bool             `yaml:"enabled"`
+	Prometheus PrometheusConfig `yaml:"prometheus"`
 }
 
 // PrometheusConfig controls Prometheus metrics
 type PrometheusConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	Path    string `mapstructure:"path"`
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
 // SecretsConfig controls how secrets are managed
 type SecretsConfig struct {
-	Provider string `mapstructure:"provider"` // vault, aws, env, etc.
-
-	Vault *VaultConfig `mapstructure:"vault"`
+	Provider string      `yaml:"provider"` // vault, aws, env, etc.
+	Vault    VaultConfig `yaml:"vault"`
 }
 
 // VaultConfig controls HashiCorp Vault integration
 type VaultConfig struct {
-	Address   string `mapstructure:"address"`
-	TokenPath string `mapstructure:"tokenPath"`
+	Address   string `yaml:"address"`
+	TokenPath string `yaml:"tokenPath"`
 }
 
 // HealthConfig controls health checking behavior
 type HealthConfig struct {
 	// CheckInterval is how frequently to run health checks
-	CheckInterval time.Duration `mapstructure:"checkInterval"`
+	CheckInterval time.Duration `yaml:"checkInterval"`
 
 	// MaxConsecutiveFailures is the maximum number of consecutive failures allowed
-	MaxConsecutiveFailures int `mapstructure:"maxConsecutiveFailures"`
+	MaxConsecutiveFailures int `yaml:"maxConsecutiveFailures"`
 }
 
-// LoadConfig loads configuration from file, environment, and flags
-func LoadConfig(configPath string) (*Config, error) {
-	v := viper.New()
+// ShutdownConfig controls graceful shutdown behavior
+type ShutdownConfig struct {
+	// GracePeriod is the maximum time to wait for a running job to complete during shutdown
+	GracePeriod time.Duration `yaml:"gracePeriod"`
+}
 
-	// Set defaults
-	setDefaults(v)
-
-	// Use config file if specified
-	if configPath != "" {
-		v.SetConfigFile(configPath)
-	} else {
-		// Search for config in standard locations
-		v.SetConfigName("nautilus")
-		v.AddConfigPath(".")
-		v.AddConfigPath("./config")
-		v.AddConfigPath("/etc/nautilus")
-	}
-
-	// Read environment variables prefixed with NAUTILUS_
-	v.SetEnvPrefix("NAUTILUS")
-	v.AutomaticEnv()
-
-	// Attempt to read config file (non-fatal if not found)
-	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, err
-		}
-	}
-
-	// Parse config into struct
-	var config Config
-	if err := v.Unmarshal(&config); err != nil {
-		return nil, err
-	}
-
-	// Ensure required structures exist
-	if config.Operator == nil {
-		config.Operator = &OperatorConfig{
-			Name: "nautilus-operator",
-		}
-	}
-
-	if config.Execution == nil {
-		config.Execution = &ExecutionConfig{
-			RunOnce: true,
-		}
-	}
-
-	if config.Execution.Parallel == nil {
-		config.Execution.Parallel = &ParallelConfig{
-			Workers:    10,
-			BufferSize: 100,
-		}
-	}
-
-	if config.API == nil {
-		config.API = &APIConfig{
+// DefaultConfig returns a Config with sensible default values
+func DefaultConfig() *Config {
+	return &Config{
+		Job: JobConfig{
+			Name: "nautilus-job",
+		},
+		Execution: ExecutionConfig{
+			Mode:         enums.ModeOneShot,
+			Timeout:      10 * time.Minute,
+			MaxRetries:   0,
+			RetryBackoff: 1 * time.Second,
+		},
+		API: APIConfig{
 			Enabled:   true,
 			Port:      12911,
 			Path:      "/health",
 			DebugMode: false,
-		}
-	}
-
-	if config.Logging == nil {
-		config.Logging = &LoggingConfig{
+			TLS: TLSConfig{
+				Enabled: false,
+			},
+		},
+		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "console",
-		}
-	}
-
-	if config.Metrics == nil {
-		config.Metrics = &MetricsConfig{
+		},
+		Metrics: MetricsConfig{
 			Enabled: true,
-		}
-	}
-
-	if config.Health == nil {
-		config.Health = &HealthConfig{
+			Prometheus: PrometheusConfig{
+				Enabled: true,
+				Path:    "/metrics",
+			},
+		},
+		Secrets: SecretsConfig{
+			Provider: "env",
+		},
+		Health: HealthConfig{
 			CheckInterval:          30 * time.Second,
 			MaxConsecutiveFailures: 3,
-		}
+		},
+		Shutdown: ShutdownConfig{
+			GracePeriod: 30 * time.Second,
+		},
 	}
-
-	return &config, nil
 }
 
-// setDefaults sets sensible default values for configuration
-func setDefaults(v *viper.Viper) {
-	// Operator defaults
-	v.SetDefault("operator.name", "nautilus-operator")
+// LoadConfig loads configuration from a YAML file
+// If path is empty, returns DefaultConfig()
+func LoadConfig(configPath string) (*Config, error) {
+	// Return default config if no path specified
+	if configPath == "" {
+		return DefaultConfig(), nil
+	}
 
-	// Execution defaults
-	v.SetDefault("execution.runOnce", true)
-	v.SetDefault("execution.waitAfterCompletion", false)
-	v.SetDefault("execution.parallel.workers", 10)
-	v.SetDefault("execution.parallel.bufferSize", 100)
-	v.SetDefault("execution.timeout", "10m")
+	// Read the YAML file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
 
-	// API defaults
-	v.SetDefault("api.enabled", true)
-	v.SetDefault("api.port", 12911)
-	v.SetDefault("api.path", "/health")
-	v.SetDefault("api.tls.enabled", false)
+	// Start with defaults
+	config := DefaultConfig()
 
-	// Logging defaults
-	v.SetDefault("logging.level", "info")
-	v.SetDefault("logging.format", "console")
-	v.SetDefault("logging.sentry.enabled", false)
-	v.SetDefault("logging.gelf.enabled", false)
+	// Unmarshal YAML into config (will override defaults)
+	if err := yaml.Unmarshal(data, config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
 
-	// Metrics defaults
-	v.SetDefault("metrics.enabled", true)
-	v.SetDefault("metrics.prometheus.enabled", true)
-	v.SetDefault("metrics.prometheus.path", "/metrics")
-
-	// Secrets defaults
-	v.SetDefault("secrets.provider", "env")
-
-	// Health defaults
-	v.SetDefault("health.checkInterval", "30s")
-	v.SetDefault("health.maxConsecutiveFailures", 3)
+	return config, nil
 }
