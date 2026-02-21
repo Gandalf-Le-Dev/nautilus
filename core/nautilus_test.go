@@ -379,3 +379,69 @@ func TestConfigOptions(t *testing.T) {
 		t.Errorf("Expected grace period 1m, got %v", n.config.Shutdown.GracePeriod)
 	}
 }
+
+// TestCronScheduleExecution verifies cron-based periodic execution
+func TestCronScheduleExecution(t *testing.T) {
+	job := &mockJob{}
+	execCount := 0
+
+	job.executeFn = func(ctx context.Context) error {
+		execCount++
+		return nil
+	}
+
+	n, err := New(
+		WithName("cron-test"),
+		WithSchedule("* * * * * *"), // Every second (cron.WithSeconds())
+		WithAPI(false, 0),
+		WithMetrics(false),
+	)
+	if err != nil {
+		t.Fatalf("failed to create nautilus: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err = n.Run(ctx, job)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if execCount < 2 {
+		t.Fatalf("expected at least 2 cron executions, got %d", execCount)
+	}
+}
+
+// TestExecutionTimeout verifies that job execution respects timeout
+func TestExecutionTimeout(t *testing.T) {
+	job := &mockJob{
+		executeFn: func(ctx context.Context) error {
+			// Block until context is cancelled
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	n, err := New(
+		WithName("timeout-test"),
+		WithOneShot(),
+		WithTimeout(500*time.Millisecond),
+		WithAPI(false, 0),
+		WithMetrics(false),
+	)
+	if err != nil {
+		t.Fatalf("failed to create nautilus: %v", err)
+	}
+
+	start := time.Now()
+	_ = n.Run(ctx, job)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected timeout around 500ms, but took %v", elapsed)
+	}
+}
