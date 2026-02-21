@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,10 +19,11 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	mux    *http.ServeMux
-	server *http.Server
-	config *config.APIConfig
-	logger zerolog.Logger
+	mux     *http.ServeMux
+	handler http.Handler // mux wrapped with rate limiting
+	server  *http.Server
+	config  *config.APIConfig
+	logger  zerolog.Logger
 
 	// Health check handlers
 	healthCheckers []interfaces.HealthCheck
@@ -75,8 +77,12 @@ func NewServer(cfg *config.APIConfig, version string) *Server {
 	// Register routes
 	s.registerRoutes()
 
+	// Wrap mux with rate limiting (100 req/s, burst of 100)
+	rl := newRateLimiter(100, 100)
+	s.handler = rateLimit(rl)(mux)
+
 	// Create handler chain with middleware
-	handler := s.recoverer(s.requestID(s.realIP(mux)))
+	handler := s.recoverer(s.requestID(s.realIP(s.handler)))
 
 	// Wrap with timeout
 	handler = http.TimeoutHandler(handler, 30*time.Second, "request timeout")
@@ -320,5 +326,55 @@ func (s *Server) handleConfig() http.HandlerFunc {
 		sanitized.TLS.Enabled = s.config.TLS.Enabled
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(sanitized)
+	}
+}
+
+// rateLimiter implements a simple token bucket rate limiter.
+type rateLimiter struct {
+	mu         sync.Mutex
+	tokens     float64
+	maxTokens  float64
+	refillRate float64 // tokens per second
+	lastRefill time.Time
+}
+
+func newRateLimiter(requestsPerSecond float64, burst int) *rateLimiter {
+	return &rateLimiter{
+		tokens:     float64(burst),
+		maxTokens:  float64(burst),
+		refillRate: requestsPerSecond,
+		lastRefill: time.Now(),
+	}
+}
+
+func (rl *rateLimiter) allow() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRefill).Seconds()
+	rl.tokens += elapsed * rl.refillRate
+	if rl.tokens > rl.maxTokens {
+		rl.tokens = rl.maxTokens
+	}
+	rl.lastRefill = now
+
+	if rl.tokens < 1 {
+		return false
+	}
+	rl.tokens--
+	return true
+}
+
+func rateLimit(rl *rateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !rl.allow() {
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte("rate limit exceeded"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }

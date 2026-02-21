@@ -107,3 +107,28 @@ func TestDebugConfigEndpointDisabled(t *testing.T) {
 		t.Fatalf("expected 403 when debug disabled, got %d", w.Code)
 	}
 }
+
+func TestRateLimiting(t *testing.T) {
+	cfg := &config.APIConfig{
+		Enabled: true,
+		Port:    0,
+	}
+
+	s := NewServer(cfg, "test")
+
+	// Hammer the endpoint beyond rate limit
+	var rejected int
+	for i := range 150 {
+		_ = i
+		req := httptest.NewRequest("GET", "/health", nil)
+		w := httptest.NewRecorder()
+		s.handler.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			rejected++
+		}
+	}
+
+	if rejected == 0 {
+		t.Fatal("expected some requests to be rate limited")
+	}
+}
