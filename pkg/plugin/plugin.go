@@ -99,7 +99,19 @@ func (r *PluginRegistry) Get(name string) (Plugin, bool) {
 	return plugin, ok
 }
 
-// GetByType retrieves all plugins of a specific type
+// GetPluginsByType returns all plugins that implement the given interface type.
+// Usage: dbPlugins := GetPluginsByType[DatabasePlugin](registry)
+func GetPluginsByType[T any](r *PluginRegistry) []T {
+	var result []T
+	for _, p := range r.plugins {
+		if typed, ok := any(p).(T); ok {
+			result = append(result, typed)
+		}
+	}
+	return result
+}
+
+// Deprecated: Use GetPluginsByType[T](registry) instead.
 func (r *PluginRegistry) GetByType(pluginType any) []Plugin {
 	var result []Plugin
 

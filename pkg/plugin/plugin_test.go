@@ -115,3 +115,32 @@ func TestTerminateAllNoErrors(t *testing.T) {
 		t.Fatalf("expected 0 termination errors, got %d", len(errs))
 	}
 }
+
+// testDatabasePlugin implements both Plugin and DatabasePlugin
+type testDatabasePlugin struct {
+	testPlugin
+}
+
+func (p *testDatabasePlugin) Connect(ctx context.Context) error    { return nil }
+func (p *testDatabasePlugin) Disconnect(ctx context.Context) error { return nil }
+func (p *testDatabasePlugin) Ping(ctx context.Context) error       { return nil }
+
+func TestGetPluginsByType(t *testing.T) {
+	r := NewPluginRegistry()
+
+	dbPlugin := &testDatabasePlugin{testPlugin: testPlugin{name: "db"}}
+	regularPlugin := &testPlugin{name: "regular"}
+	r.Register(dbPlugin)
+	r.Register(regularPlugin)
+
+	dbPlugins := GetPluginsByType[DatabasePlugin](r)
+	if len(dbPlugins) != 1 {
+		t.Fatalf("expected 1 database plugin, got %d", len(dbPlugins))
+	}
+
+	// All plugins should match Plugin interface
+	allPlugins := GetPluginsByType[Plugin](r)
+	if len(allPlugins) != 2 {
+		t.Fatalf("expected 2 plugins matching Plugin interface, got %d", len(allPlugins))
+	}
+}
