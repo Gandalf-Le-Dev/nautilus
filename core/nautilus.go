@@ -164,7 +164,13 @@ func (n *Nautilus) Run(ctx context.Context, job interfaces.Job) error {
 	if err := n.plugins.InitializeAll(ctx); err != nil {
 		return fmt.Errorf("plugin initialization failed: %w", err)
 	}
-	defer n.plugins.TerminateAll(ctx)
+	defer func() {
+		if errs := n.plugins.TerminateAll(ctx); len(errs) > 0 {
+			for _, err := range errs {
+				n.logger.Error().Err(err).Msg("plugin termination error")
+			}
+		}
+	}()
 
 	// Start API server if enabled
 	if n.apiServer != nil {

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 )
 
 // Plugin is the interface that all Nautilus plugins must implement
@@ -147,9 +148,13 @@ func (r *PluginRegistry) InitializeAll(ctx context.Context) error {
 	return nil
 }
 
-// TerminateAll terminates all registered plugins
-func (r *PluginRegistry) TerminateAll(ctx context.Context) {
+// TerminateAll terminates all registered plugins and returns any errors encountered.
+func (r *PluginRegistry) TerminateAll(ctx context.Context) []error {
+	var errs []error
 	for _, plugin := range r.plugins {
-		_ = plugin.Terminate(ctx)
+		if err := plugin.Terminate(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("plugin %s: %w", plugin.Name(), err))
+		}
 	}
+	return errs
 }
