@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -108,6 +109,20 @@ func (s *Server) Start() error {
 	}
 
 	return s.server.ListenAndServe()
+}
+
+// StartAsync starts the server in a goroutine and returns a channel
+// that will receive any startup/runtime error (or nil on clean shutdown).
+func (s *Server) StartAsync() <-chan error {
+	errCh := make(chan error, 1)
+	go func() {
+		if err := s.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		} else {
+			errCh <- nil
+		}
+	}()
+	return errCh
 }
 
 // Stop gracefully stops the server

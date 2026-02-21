@@ -2,9 +2,7 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -170,8 +168,11 @@ func (n *Nautilus) Run(ctx context.Context, job interfaces.Job) error {
 
 	// Start API server if enabled
 	if n.apiServer != nil {
+		apiErrCh := n.apiServer.StartAsync()
+
+		// Monitor for API server errors in background
 		go func() {
-			if err := n.apiServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := <-apiErrCh; err != nil {
 				n.logger.Error().Err(err).Msg("API server error")
 			}
 		}()
