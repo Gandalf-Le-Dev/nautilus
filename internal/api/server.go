@@ -292,16 +292,33 @@ func (s *Server) handleLive() http.HandlerFunc {
 	}
 }
 
+// sanitizedAPIConfig is a copy of APIConfig with sensitive fields redacted.
+type sanitizedAPIConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Port      int    `json:"port"`
+	Path      string `json:"path"`
+	DebugMode bool   `json:"debugMode"`
+	TLS       struct {
+		Enabled bool `json:"enabled"`
+	} `json:"tls"`
+}
+
 // handleConfig creates the config debug handler
 func (s *Server) handleConfig() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Only show in debug environments
-		if s.config.DebugMode {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.config)
-		} else {
+		if !s.config.DebugMode {
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte("Debug endpoints disabled in production"))
+			return
 		}
+		sanitized := sanitizedAPIConfig{
+			Enabled:   s.config.Enabled,
+			Port:      s.config.Port,
+			Path:      s.config.Path,
+			DebugMode: s.config.DebugMode,
+		}
+		sanitized.TLS.Enabled = s.config.TLS.Enabled
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sanitized)
 	}
 }

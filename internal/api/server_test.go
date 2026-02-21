@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,4 +57,53 @@ func TestServerStartsSuccessfully(t *testing.T) {
 
 	// Clean shutdown
 	s.Stop(context.Background())
+}
+
+func TestDebugConfigEndpointSanitized(t *testing.T) {
+	cfg := &config.APIConfig{
+		Enabled:   true,
+		Port:      12911,
+		DebugMode: true,
+		TLS: config.TLSConfig{
+			Enabled:  true,
+			CertFile: "/secret/cert.pem",
+			KeyFile:  "/secret/key.pem",
+		},
+	}
+
+	s := NewServer(cfg, "test")
+
+	req := httptest.NewRequest("GET", "/debug/config", nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "/secret/cert.pem") {
+		t.Fatal("config output should not contain TLS cert path")
+	}
+	if strings.Contains(body, "/secret/key.pem") {
+		t.Fatal("config output should not contain TLS key path")
+	}
+}
+
+func TestDebugConfigEndpointDisabled(t *testing.T) {
+	cfg := &config.APIConfig{
+		Enabled:   true,
+		Port:      12911,
+		DebugMode: false,
+	}
+
+	s := NewServer(cfg, "test")
+
+	req := httptest.NewRequest("GET", "/debug/config", nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when debug disabled, got %d", w.Code)
+	}
 }
